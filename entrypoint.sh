@@ -9,7 +9,8 @@ mkdir -p "${HOME}/.claude" \
          "${HOME}/.config" \
          "${HOME}/.cache" \
          "${HOME}/.local/bin" \
-         "${HOME}/.npm-global"
+         "${HOME}/.npm-global" \
+         "${MAMBA_ROOT_PREFIX:-${HOME}/.mamba}"
 
 # Pull in the host's git identity when the wrapper was asked to share it.
 # It is included rather than used directly as the global config, so that the

@@ -79,6 +79,7 @@ RUN groupadd --gid "${USER_GID}" "${USERNAME}" \
                 /home/${USERNAME}/.cache \
                 /home/${USERNAME}/.local/bin \
                 /home/${USERNAME}/.npm-global \
+                /home/${USERNAME}/.mamba \
                 /workspace \
     && chown -R "${USER_UID}:${USER_GID}" /home/${USERNAME} /workspace
 
@@ -88,6 +89,14 @@ RUN groupadd --gid "${USER_GID}" "${USERNAME}" \
 RUN curl -Ls "https://micro.mamba.pm/api/micromamba/linux-64/${MICROMAMBA_VERSION}" \
         | tar -xj -C /usr/local bin/micromamba \
     && micromamba --version
+
+# Channel configuration for the user, not for the build below: this is the
+# highest-precedence config file micromamba reads, so `micromamba install <pkg>`
+# resolves against the same channel the image was built from without anyone
+# having to pass -c.  The build itself stays hermetic with --no-rc.
+RUN mkdir -p /etc/conda \
+    && printf 'channels:\n  - conda-forge\nchannel_priority: strict\n' \
+        > /etc/conda/.condarc
 
 # The environment Claude Code works in.  It carries Satpy and Trollflow2 plus
 # their test dependencies, so that both test suites run out of the box, and
@@ -117,6 +126,10 @@ RUN curl -Ls "https://micro.mamba.pm/api/micromamba/linux-64/${MICROMAMBA_VERSIO
 # This is one long layer on purpose: the package caches must be gone, and the
 # environment owned by the unprivileged user, in the same layer that creates
 # them, or they stay in the image no matter what a later step deletes.
+#
+# MAMBA_ROOT_PREFIX here is only the build's scratch space, and is removed with
+# the caches it holds; the runtime one is set further down, on the persistent
+# home volume.
 ENV MAMBA_ROOT_PREFIX=/opt/mamba \
     CONDA_PREFIX=/opt/conda
 RUN micromamba create -y -p "${CONDA_PREFIX}" -c conda-forge --no-rc \
@@ -153,8 +166,7 @@ RUN micromamba create -y -p "${CONDA_PREFIX}" -c conda-forge --no-rc \
         pytroll-schedule \
     && micromamba clean --all --yes --force-pkgs-dirs \
     && rm -rf "${MAMBA_ROOT_PREFIX}" /root/.mamba /root/.conda /root/.cache \
-    && mkdir -p "${MAMBA_ROOT_PREFIX}" \
-    && chown -R "${USER_UID}:${USER_GID}" "${CONDA_PREFIX}" "${MAMBA_ROOT_PREFIX}"
+    && chown -R "${USER_UID}:${USER_GID}" "${CONDA_PREFIX}"
 
 # Drop the setuid/setgid bits from everything in the image.  Nothing in this
 # sandbox needs them, and the container also runs with --cap-drop=ALL and
@@ -164,8 +176,16 @@ RUN find / -xdev -perm /6000 -type f -exec chmod a-s {} + || true
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod 0755 /usr/local/bin/entrypoint.sh
 
+# The environment is owned by the unprivileged user, so `micromamba install
+# <pkg>` works without any privilege: CONDA_PREFIX makes /opt/conda the implicit
+# target, and /etc/conda/.condarc supplies the channel.  Such an install lasts
+# for the life of the container - /opt/conda is part of the image, not of a
+# volume - so the root prefix is put on the persistent home instead.  That keeps
+# the downloaded packages across sessions, which makes repeating an install
+# cheap, and lets `micromamba create -n <name>` build environments that survive.
 USER ${USERNAME}
-ENV HOME=/home/${USERNAME} \
+ENV MAMBA_ROOT_PREFIX=/home/${USERNAME}/.mamba \
+    HOME=/home/${USERNAME} \
     NPM_CONFIG_PREFIX=/home/${USERNAME}/.npm-global \
     PATH=/home/${USERNAME}/.npm-global/bin:/home/${USERNAME}/.local/bin:/opt/conda/bin:/usr/local/bin:/usr/bin:/bin \
     DISABLE_AUTOUPDATER=1 \
