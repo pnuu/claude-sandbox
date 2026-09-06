@@ -51,9 +51,11 @@ RUN apt-get update \
         build-essential \
         pkg-config \
         python3 \
+        python3-dev \
         python3-venv \
         python3-pip \
         pipx \
+        libhdf4-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Node.js from NodeSource - Claude Code is distributed as an npm package.
@@ -68,6 +70,23 @@ RUN ln -sf /usr/bin/fdfind /usr/local/bin/fd
 # (rather than writing into the persistent volume) is how it gets updated.
 RUN npm install -g @anthropic-ai/claude-code \
     && npm cache clean --force
+
+# Python environment for working on the Pytroll stack.  Debian's interpreter is
+# externally managed (PEP 668), so everything goes into a virtualenv that is put
+# first on PATH; the sandbox has no other Python workload to conflict with it.
+#
+# Satpy and Trollflow2 are installed with their test extras so that their suites
+# can run out of the box.  A checkout mounted at /workspace can be layered on
+# top with `pip install -e .` (or simply put on PYTHONPATH), which keeps the
+# dependencies from the image and the code from the host.
+ENV VIRTUAL_ENV=/opt/venv
+RUN python3 -m venv "${VIRTUAL_ENV}" \
+    && "${VIRTUAL_ENV}/bin/pip" install --no-cache-dir --upgrade pip setuptools wheel \
+    && "${VIRTUAL_ENV}/bin/pip" install --no-cache-dir \
+        "satpy[tests]" \
+        "trollflow2[test]" \
+        pytroll-schedule \
+        ruff
 
 # Drop the setuid/setgid bits from everything in the image.  Nothing in this
 # sandbox needs them, and the container also runs with --cap-drop=ALL and
@@ -91,7 +110,7 @@ RUN chmod 0755 /usr/local/bin/entrypoint.sh
 USER ${USERNAME}
 ENV HOME=/home/${USERNAME} \
     NPM_CONFIG_PREFIX=/home/${USERNAME}/.npm-global \
-    PATH=/home/${USERNAME}/.npm-global/bin:/home/${USERNAME}/.local/bin:/usr/local/bin:/usr/bin:/bin \
+    PATH=/home/${USERNAME}/.npm-global/bin:/home/${USERNAME}/.local/bin:/opt/venv/bin:/usr/local/bin:/usr/bin:/bin \
     DISABLE_AUTOUPDATER=1
 
 WORKDIR /workspace
