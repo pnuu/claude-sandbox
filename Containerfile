@@ -21,6 +21,9 @@ ENV DEBIAN_FRONTEND=noninteractive \
     LC_ALL=C.UTF-8
 
 # Base tooling that Claude Code (and the code it works on) typically needs.
+# Deliberately no C toolchain: everything native comes prebuilt from conda-forge,
+# so a compiler would add some 190 MB for nothing.  `micromamba install
+# compilers` brings one in at runtime if a source build is ever needed.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
@@ -50,8 +53,6 @@ RUN apt-get update \
         diffutils \
         patch \
         make \
-        build-essential \
-        pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
 # Node.js from NodeSource - Claude Code is distributed as an npm package.
@@ -99,6 +100,11 @@ RUN curl -Ls "https://micro.mamba.pm/api/micromamba/linux-64/${MICROMAMBA_VERSIO
 # and the `test` extra of Trollflow2's.  Trollflow2 itself is not on conda-forge
 # and follows below, from PyPI.
 #
+# astropy and geoviews are conda-forge metapackages that pull in a pile of
+# recommended extras - between them the whole IPython/Jupyter/ipywidgets stack,
+# datashader and geopandas, some 110 MB.  The importable packages the tests
+# actually need are astropy-base and geoviews-core.
+#
 # geoviews carries a lower bound because its old noarch builds declare no upper
 # bound on Python; without one the solver happily picks a 2019 release that does
 # not import on any modern interpreter.
@@ -118,7 +124,7 @@ RUN micromamba create -y -p "${CONDA_PREFIX}" -c conda-forge --no-rc \
         pip \
         ruff \
         satpy \
-        astropy \
+        astropy-base \
         behave \
         bokeh \
         bottleneck \
@@ -126,7 +132,7 @@ RUN micromamba create -y -p "${CONDA_PREFIX}" -c conda-forge --no-rc \
         defusedxml \
         ephem \
         fsspec \
-        "geoviews>=1.15" \
+        "geoviews-core>=1.15" \
         h5netcdf \
         h5py \
         imageio \
