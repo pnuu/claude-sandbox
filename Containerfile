@@ -67,6 +67,20 @@ RUN ln -sf /usr/bin/fdfind /usr/local/bin/fd
 RUN npm install -g @anthropic-ai/claude-code \
     && npm cache clean --force
 
+# The unprivileged user is created before the Python environment so that the
+# environment can be built with its ownership already correct; chowning it
+# afterwards would copy all of its couple of gigabytes into a second layer.
+RUN groupadd --gid "${USER_GID}" "${USERNAME}" \
+    && useradd --uid "${USER_UID}" --gid "${USER_GID}" --create-home \
+        --shell /bin/bash "${USERNAME}" \
+    && mkdir -p /home/${USERNAME}/.claude \
+                /home/${USERNAME}/.config \
+                /home/${USERNAME}/.cache \
+                /home/${USERNAME}/.local/bin \
+                /home/${USERNAME}/.npm-global \
+                /workspace \
+    && chown -R "${USER_UID}:${USER_GID}" /home/${USERNAME} /workspace
+
 # micromamba: the whole Python side of the image comes from conda-forge rather
 # than from Debian, which is how the Pytroll stack is normally deployed and
 # avoids Debian's externally-managed interpreter (PEP 668) entirely.
@@ -88,6 +102,15 @@ RUN curl -Ls "https://micro.mamba.pm/api/micromamba/linux-64/${MICROMAMBA_VERSIO
 # geoviews carries a lower bound because its old noarch builds declare no upper
 # bound on Python; without one the solver happily picks a 2019 release that does
 # not import on any modern interpreter.
+#
+# Trollflow2, its runtime dependency posttroll and its test dependency
+# pytroll-schedule have no conda-forge packages, so they come from PyPI into the
+# same environment.  They are pure Python, which keeps this free of the usual
+# conda/pip mixing hazards - everything compiled is still conda-forge's.
+#
+# This is one long layer on purpose: the package caches must be gone, and the
+# environment owned by the unprivileged user, in the same layer that creates
+# them, or they stay in the image no matter what a later step deletes.
 ENV MAMBA_ROOT_PREFIX=/opt/mamba \
     CONDA_PREFIX=/opt/conda
 RUN micromamba create -y -p "${CONDA_PREFIX}" -c conda-forge --no-rc \
@@ -119,33 +142,18 @@ RUN micromamba create -y -p "${CONDA_PREFIX}" -c conda-forge --no-rc \
         rioxarray \
         s3fs \
         skyfield \
-    && micromamba clean --all --yes \
-    && rm -rf "${MAMBA_ROOT_PREFIX}/pkgs"
-
-# Trollflow2, its runtime dependency posttroll and its test dependency
-# pytroll-schedule have no conda-forge packages, so they come from PyPI into the
-# same environment.  They are pure Python, which keeps this free of the usual
-# conda/pip mixing hazards - everything compiled is still conda-forge's.
-RUN "${CONDA_PREFIX}/bin/pip" install --no-cache-dir \
+    && "${CONDA_PREFIX}/bin/pip" install --no-cache-dir --root-user-action=ignore \
         trollflow2 \
-        pytroll-schedule
+        pytroll-schedule \
+    && micromamba clean --all --yes --force-pkgs-dirs \
+    && rm -rf "${MAMBA_ROOT_PREFIX}" /root/.mamba /root/.conda /root/.cache \
+    && mkdir -p "${MAMBA_ROOT_PREFIX}" \
+    && chown -R "${USER_UID}:${USER_GID}" "${CONDA_PREFIX}" "${MAMBA_ROOT_PREFIX}"
 
 # Drop the setuid/setgid bits from everything in the image.  Nothing in this
 # sandbox needs them, and the container also runs with --cap-drop=ALL and
 # no-new-privileges, so they would be dead weight at best.
 RUN find / -xdev -perm /6000 -type f -exec chmod a-s {} + || true
-
-RUN groupadd --gid "${USER_GID}" "${USERNAME}" \
-    && useradd --uid "${USER_UID}" --gid "${USER_GID}" --create-home \
-        --shell /bin/bash "${USERNAME}" \
-    && mkdir -p /home/${USERNAME}/.claude \
-                /home/${USERNAME}/.config \
-                /home/${USERNAME}/.cache \
-                /home/${USERNAME}/.local/bin \
-                /home/${USERNAME}/.npm-global \
-                /workspace \
-    && chown -R "${USER_UID}:${USER_GID}" /home/${USERNAME} /workspace \
-                                          "${CONDA_PREFIX}" "${MAMBA_ROOT_PREFIX}"
 
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod 0755 /usr/local/bin/entrypoint.sh
