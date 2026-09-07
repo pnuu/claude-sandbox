@@ -68,7 +68,7 @@ Everything after \`--\` is passed straight to the \`claude\` command line, e.g.
 
 Environment overrides: CLAUDE_SANDBOX_MEMORY, CLAUDE_SANDBOX_CPUS,
 CLAUDE_SANDBOX_PIDS, CLAUDE_SANDBOX_IMAGE, CLAUDE_SANDBOX_VOLUME,
-CLAUDE_SANDBOX_MOUNT_GITCONFIG.
+CLAUDE_SANDBOX_MOUNT_GITCONFIG, CLAUDE_SANDBOX_SSHD.
 EOF
 }
 
@@ -186,6 +186,12 @@ fi
 # its credentials inside the persistent volume instead.
 if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
     RUN_ARGS+=(-e "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}")
+fi
+
+# The entrypoint starts an SSH server on the container's loopback interface;
+# forward the switch that turns it off.
+if [ -n "${CLAUDE_SANDBOX_SSHD:-}" ]; then
+    RUN_ARGS+=(-e "CLAUDE_SANDBOX_SSHD=${CLAUDE_SANDBOX_SSHD}")
 fi
 
 if [ "${NO_NETWORK}" -eq 1 ]; then
