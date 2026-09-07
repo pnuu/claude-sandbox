@@ -74,10 +74,18 @@ package into the persistent home, inspect the volume, check a tool version.
 
 Debian bookworm, plus Node.js 22 (from NodeSource) and the
 `@anthropic-ai/claude-code` npm package, plus the tools Claude Code and
-ordinary development work tend to reach for: `git`, `git-lfs`,
-`openssh-client`, `curl`, `wget`, `ripgrep`, `fd`, `jq`, `tree`, `less`,
-`nano`, `vim-tiny`, `file`, `patch`, `diffutils`, archive tools, `make`,
-`build-essential`, `pkg-config`, and Python 3 with `venv`, `pip` and `pipx`.
+ordinary development work tend to reach for: `git`, `git-lfs`, `curl`, `wget`,
+`ripgrep`, `fd`, `jq`, `tree`, `less`, `nano`, `vim-tiny`, `file`, `patch`,
+`diffutils`, archive tools, `make`, and OpenSSH — both the client and a
+server, see [SSH inside the sandbox](#ssh-inside-the-sandbox).
+
+The Python side comes from conda-forge through `micromamba`, in one environment
+at `/opt/conda` that is on the `PATH` by default. It holds Satpy and Trollflow2
+with their test dependencies, so both test suites run out of the box, `ruff` and
+`pre-commit` for linting, and `paramiko` for the SSH transfers the Pytroll tools
+do. The environment belongs to the sandbox user, so `micromamba install <pkg>`
+adds to it without any privilege; such an install lasts for the life of the
+container, since `/opt/conda` is part of the image rather than of the volume.
 
 Claude Code is installed system-wide and its auto-updater is disabled
 (`DISABLE_AUTOUPDATER=1`). Update it by rebuilding the image:
@@ -90,6 +98,39 @@ Extra tools you install at runtime with `npm install -g` or `pipx install`
 land in the persistent home (`~/.npm-global`, `~/.local`) and survive
 restarts; anything installed with `apt` does not, since the container is
 started with `--rm` and the root filesystem is thrown away on exit.
+
+## SSH inside the sandbox
+
+The image runs its own SSH server, so that code which drives a remote host over
+SSH — `paramiko`, `scp`, `sftp` — can be exercised against the container
+itself:
+
+```bash
+ssh localhost                 # a shell back inside the same container
+ssh localhost python -c 'import satpy'
+scp file.txt localhost:/tmp/
+```
+
+The entrypoint creates a passphraseless key pair on the persistent volume the
+first time it runs, authorizes it for the sandbox user, and starts `sshd`. Both
+the key and the server's host key stay in `~/.ssh` on the volume, so the same
+identity comes back on every later run. The client configuration in the image
+supplies the port and the key, which is why the commands above name neither.
+
+The server runs as the unprivileged sandbox user on **port 2222**, listening on
+the loopback interface only. Nothing of it reaches the host: rootless Podman
+gives the container its own network namespace and the wrapper publishes no
+port. Only public-key authentication is accepted, and only for the sandbox
+user.
+
+Set `CLAUDE_SANDBOX_SSHD=0` to skip starting it:
+
+```bash
+CLAUDE_SANDBOX_SSHD=0 ./claude-sandbox.sh ~/src/myproject
+```
+
+There is no syslog in the container, so the server logs to `~/.ssh/sshd.log`
+on the volume — the place to look if a connection is refused.
 
 ## Resource limits
 
@@ -129,6 +170,10 @@ What the sandbox does:
   The rest of your home directory, your SSH keys and your other projects are
   not visible. The script refuses to mount `/` or your whole home directory.
 * **Ephemeral root filesystem.** `--rm` plus a `nosuid,nodev` tmpfs `/tmp`.
+* **An SSH server only the container can reach.** It listens on the
+  container's loopback interface, on port 2222, as the unprivileged sandbox
+  user, and accepts nothing but the key pair on the volume. No port is
+  published, so it is invisible from the host and from the network.
 * **Resource ceilings**, so a runaway process hits a limit instead of your
   desktop session.
 

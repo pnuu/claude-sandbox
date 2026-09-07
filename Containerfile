@@ -33,6 +33,8 @@ RUN apt-get update \
         git \
         git-lfs \
         openssh-client \
+        openssh-server \
+        openssh-sftp-server \
         bash-completion \
         less \
         nano \
@@ -71,9 +73,17 @@ RUN npm install -g @anthropic-ai/claude-code \
 # The unprivileged user is created before the Python environment so that the
 # environment can be built with its ownership already correct; chowning it
 # afterwards would copy all of its couple of gigabytes into a second layer.
+#
+# The account is given a random password that is thrown away unread.  A freshly
+# created account has none at all, which `useradd` records as a locked one, and
+# a non-root sshd refuses to let a locked account log in even by public key.
+# Nothing can be done with the password: the sandbox sshd does not accept
+# password authentication, and there is no setuid binary left to hand it to.
 RUN groupadd --gid "${USER_GID}" "${USERNAME}" \
     && useradd --uid "${USER_UID}" --gid "${USER_GID}" --create-home \
         --shell /bin/bash "${USERNAME}" \
+    && printf '%s:%s\n' "${USERNAME}" "$(head -c 32 /dev/urandom | base64)" \
+        | chpasswd \
     && mkdir -p /home/${USERNAME}/.claude \
                 /home/${USERNAME}/.config \
                 /home/${USERNAME}/.cache \
@@ -99,10 +109,11 @@ RUN mkdir -p /etc/conda \
         > /etc/conda/.condarc
 
 # The environment Claude Code works in.  It carries Satpy and Trollflow2 plus
-# their test dependencies, so that both test suites run out of the box, and
-# ruff for linting.  A checkout mounted at /workspace is layered on top with
-# `pip install -e . --no-deps`, keeping the dependencies from the image and the
-# code from the host.
+# their test dependencies, so that both test suites run out of the box, ruff and
+# pre-commit for linting, and paramiko for the SSH transfers the Pytroll tools
+# do - the image's own sshd below is what makes those runnable here.  A checkout
+# mounted at /workspace is layered on top with `pip install -e . --no-deps`,
+# keeping the dependencies from the image and the code from the host.
 #
 # conda-forge has no notion of the projects' "tests" extras, so those are listed
 # out here; keep them in sync with the `tests` extra of Satpy's pyproject.toml
@@ -151,7 +162,9 @@ RUN micromamba create -y -p "${CONDA_PREFIX}" -c conda-forge --no-rc \
         imageio \
         netcdf4 \
         numba \
+        paramiko \
         pint-xarray \
+        pre-commit \
         pyhdf \
         pytest \
         pytest-lazy-fixtures \
@@ -176,14 +189,17 @@ RUN find / -xdev -perm /6000 -type f -exec chmod a-s {} + || true
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod 0755 /usr/local/bin/entrypoint.sh
 
-# The environment is owned by the unprivileged user, so `micromamba install
-# <pkg>` works without any privilege: CONDA_PREFIX makes /opt/conda the implicit
-# target, and /etc/conda/.condarc supplies the channel.  Such an install lasts
-# for the life of the container - /opt/conda is part of the image, not of a
-# volume - so the root prefix is put on the persistent home instead.  That keeps
-# the downloaded packages across sessions, which makes repeating an install
-# cheap, and lets `micromamba create -n <name>` build environments that survive.
-USER ${USERNAME}
+# The environment the sandbox user runs in.  It is set before the USER switch so
+# that the SSH configuration below can be generated from these very values.
+#
+# The Python environment is owned by the unprivileged user, so `micromamba
+# install <pkg>` works without any privilege: CONDA_PREFIX makes /opt/conda
+# the implicit target, and /etc/conda/.condarc supplies the channel.  Such an
+# install lasts for the life of the container - /opt/conda is part of the
+# image, not of a volume - so the root prefix is put on the persistent home
+# instead.  That keeps the downloaded packages across sessions, which makes
+# repeating an install cheap, and lets `micromamba create -n <name>` build
+# environments that survive.
 ENV MAMBA_ROOT_PREFIX=/home/${USERNAME}/.mamba \
     HOME=/home/${USERNAME} \
     NPM_CONFIG_PREFIX=/home/${USERNAME}/.npm-global \
@@ -193,6 +209,64 @@ ENV MAMBA_ROOT_PREFIX=/home/${USERNAME}/.mamba \
     GDAL_DATA=/opt/conda/share/gdal \
     PROJ_DATA=/opt/conda/share/proj \
     SSL_CERT_FILE=/opt/conda/ssl/cacert.pem
+
+# An SSH server, so that code which drives a remote host over SSH - paramiko in
+# the Pytroll tools, scp, sftp - can be exercised against the container itself:
+# `ssh localhost` from inside the sandbox comes straight back in.  The
+# entrypoint generates the host key and the login key pair, and starts the
+# daemon.
+#
+# It has to run without any privilege, which is what shapes the configuration:
+# port 2222 because nothing may bind below 1024 under --cap-drop=ALL, one
+# permitted user because a non-root sshd cannot change identity anyway, public
+# keys only, no PID file, and no PAM, whose session modules need root.  It
+# listens on the loopback interface alone, and even that is reachable only from
+# inside the container - rootless Podman publishes no port unless asked to.
+#
+# SetEnv hands the environment above to SSH sessions.  sshd builds a fresh
+# environment for each session rather than inheriting the container's, so
+# without it `ssh localhost python` would miss /opt/conda entirely.  Only the
+# first SetEnv in the file counts, hence the single line assembled here.
+RUN mkdir -p /etc/ssh/ssh_config.d \
+    && ssh_env="PATH=${PATH}" \
+    && ssh_env="${ssh_env} MAMBA_ROOT_PREFIX=${MAMBA_ROOT_PREFIX}" \
+    && ssh_env="${ssh_env} NPM_CONFIG_PREFIX=${NPM_CONFIG_PREFIX}" \
+    && ssh_env="${ssh_env} CONDA_PREFIX=${CONDA_PREFIX}" \
+    && ssh_env="${ssh_env} CONDA_DEFAULT_ENV=${CONDA_DEFAULT_ENV}" \
+    && ssh_env="${ssh_env} GDAL_DATA=${GDAL_DATA} PROJ_DATA=${PROJ_DATA}" \
+    && ssh_env="${ssh_env} SSL_CERT_FILE=${SSL_CERT_FILE}" \
+    && ssh_env="${ssh_env} LANG=${LANG} LC_ALL=${LC_ALL}" \
+    && ssh_env="${ssh_env} DISABLE_AUTOUPDATER=${DISABLE_AUTOUPDATER}" \
+    && printf '%s\n' \
+        'Port 2222' \
+        'ListenAddress 127.0.0.1' \
+        'ListenAddress ::1' \
+        "HostKey ${HOME}/.ssh/ssh_host_ed25519_key" \
+        "AllowUsers ${USERNAME}" \
+        'PermitRootLogin no' \
+        'PubkeyAuthentication yes' \
+        'PasswordAuthentication no' \
+        'KbdInteractiveAuthentication no' \
+        'PermitEmptyPasswords no' \
+        'UsePAM no' \
+        'PidFile none' \
+        'PrintMotd no' \
+        'X11Forwarding no' \
+        'AcceptEnv LANG LC_*' \
+        "SetEnv ${ssh_env}" \
+        'Subsystem sftp /usr/lib/openssh/sftp-server' \
+        > /etc/ssh/sshd_config.sandbox \
+    && printf '%s\n' \
+        '# The sandbox reaching itself: the port and the key are implied.' \
+        'Host localhost 127.0.0.1 ::1 claude-sandbox' \
+        '    HostName 127.0.0.1' \
+        '    Port 2222' \
+        "    User ${USERNAME}" \
+        "    IdentityFile ${HOME}/.ssh/id_ed25519" \
+        '    StrictHostKeyChecking accept-new' \
+        > /etc/ssh/ssh_config.d/10-claude-sandbox.conf
+
+USER ${USERNAME}
 
 WORKDIR /workspace
 
